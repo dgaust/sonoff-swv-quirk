@@ -1,0 +1,236 @@
+blueprint:
+  name: Smart Irrigation - SONOFF SWV (device-timed)
+  description: >-
+    Waters a Smart Irrigation zone with a SONOFF SWV, using the valve's own
+    cyclic timed irrigation program instead of a Home Assistant `delay`.
+
+
+    On a Smart Irrigation start trigger this stages a one-shot program - 1 cycle,
+    no interval, duration = the seconds Smart Irrigation calculated - presses the
+    valve's "Start timed irrigation" button, and resets the zone's bucket. The
+    valve runs the program and closes itself, so a Home Assistant restart, a
+    reload or a Zigbee dropout part-way through no longer leaves the water
+    running. Measured on firmware 1.0.4: a 10-second program ran for exactly 10
+    seconds and the valve shut itself off.
+
+
+    Note there is no "turn the valve on" step - writing the program is what
+    starts it. Staging the three numbers touches nothing on the device; only the
+    button press goes out over Zigbee, as a single write.
+
+
+    Pick the valve device and the zone; the switch, the three program numbers and
+    the start button are found automatically. That needs the SWV custom quirk -
+    the stock ZHA quirk creates none of them. If they cannot be found the
+    automation stops with a notification rather than watering blindly.
+  domain: automation
+  source_url: https://github.com/dgaust/smarterzones/blob/main/blueprints/smart_irrigation_swv.yaml
+
+  input:
+    swv_device:
+      name: SONOFF SWV
+      description: >-
+        The water valve. Its switch, program numbers and start button are
+        detected from the device.
+      selector:
+        device:
+          filter:
+            - integration: zha
+
+    irrigation_zone:
+      name: Smart Irrigation zone
+      description: >-
+        The zone sensor whose state is the calculated watering time in seconds.
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: duration
+
+    pause_switch:
+      name: Pause switch
+      description: >-
+        Optional. If set and off, the automation does nothing - a manual
+        override for rain, maintenance or holidays.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: input_boolean
+            - domain: switch
+
+    max_duration:
+      name: Maximum watering time
+      description: >-
+        Hard cap on the duration written to the valve, whatever Smart Irrigation
+        asks for. Guards against a runaway calculation.
+      default: 3600
+      selector:
+        number:
+          min: 60
+          max: 86400
+          step: 60
+          unit_of_measurement: seconds
+          mode: box
+
+    failsafe:
+      name: Close the valve if the program does not
+      description: >-
+        Wait for the valve to close itself and force it shut if it has not. This
+        does not put Home Assistant back in charge of the normal run - it only
+        acts when the device-side program has failed.
+      default: true
+      selector:
+        boolean:
+
+    failsafe_margin:
+      name: Failsafe grace period
+      description: >-
+        How long past the expected finish to wait before forcing the valve shut.
+      default: 120
+      selector:
+        number:
+          min: 30
+          max: 900
+          step: 30
+          unit_of_measurement: seconds
+          mode: box
+
+variables:
+  swv_device: !input swv_device
+  zone_entity: !input irrigation_zone
+  pause_entities: !input pause_switch
+  max_seconds: !input max_duration
+  use_failsafe: !input failsafe
+  margin_seconds: !input failsafe_margin
+
+  # The quirk names these entities, so their ids carry the field they drive.
+  # Appending '' before `first` keeps a failed match as an empty string rather
+  # than an undefined that blows up mid-run; the guard below reports it.
+  swv_numbers: >-
+    {{ device_entities(swv_device) | select('match', 'number') | list }}
+  cycles_number: >-
+    {{ (swv_numbers | select('search', 'timed_irrigation_cycles') | list + ['']) | first }}
+  duration_number: >-
+    {{ (swv_numbers | select('search', 'timed_irrigation_duration') | list + ['']) | first }}
+  interval_number: >-
+    {{ (swv_numbers | select('search', 'timed_irrigation_interval') | list + ['']) | first }}
+  start_button: >-
+    {{ (device_entities(swv_device) | select('match', 'button')
+        | select('search', 'start_timed_irrigation') | list + ['']) | first }}
+  # The device has two switches: the valve itself and the shortage auto-close
+  # config switch. Only the latter is identifiable by name, so reject it.
+  valve_entity: >-
+    {{ (device_entities(swv_device) | select('match', 'switch')
+        | reject('search', 'shortage') | reject('search', 'auto_close')
+        | list + ['']) | first }}
+
+  # Smart Irrigation reports seconds, sometimes fractional; the valve's number
+  # is a whole-second integer, so round before clamping to the cap.
+  water_seconds: >-
+    {{ [ states(zone_entity) | float(0) | round(0) | int, max_seconds | int ] | min }}
+
+alias: Smart Irrigation - SONOFF SWV (device-timed)
+description: ""
+
+triggers:
+  - trigger: event
+    event_type: smart_irrigation_start_irrigation_all_zones
+
+conditions:
+  - condition: template
+    value_template: "{{ water_seconds > 0 }}"
+  - condition: template
+    value_template: >-
+      {{ pause_entities | count == 0
+         or pause_entities | select('is_state', 'on') | list | count == pause_entities | count }}
+
+actions:
+  - alias: Stop if the valve's entities could not be identified
+    if:
+      - condition: template
+        value_template: >-
+          {{ not (valve_entity and start_button and cycles_number
+                  and duration_number and interval_number) }}
+    then:
+      - action: persistent_notification.create
+        data:
+          title: Irrigation blueprint could not find the valve
+          message: >-
+            The timed irrigation entities were not found on the selected device,
+            so watering was skipped. Is the SWV custom quirk loaded? Found
+            switch "{{ valve_entity or 'none' }}", button
+            "{{ start_button or 'none' }}" and numbers
+            {{ swv_numbers | join(', ') if swv_numbers else 'none' }}.
+          notification_id: swv_irrigation_entities_missing
+      - stop: The SWV's timed irrigation entities could not be found
+        error: true
+
+  # Staging is local to the quirk - no Zigbee traffic, so no pacing needed
+  # between these three.
+  - action: number.set_value
+    target:
+      entity_id: "{{ cycles_number }}"
+    data:
+      value: 1
+
+  # Not zero: the valve refuses a program containing a zero, even in a field that
+  # does nothing. With a single cycle the interval is never waited out anyway.
+  - action: number.set_value
+    target:
+      entity_id: "{{ interval_number }}"
+    data:
+      value: 1
+
+  - action: number.set_value
+    target:
+      entity_id: "{{ duration_number }}"
+    data:
+      value: "{{ water_seconds }}"
+
+  # This is the watering. One Zigbee write, and the valve opens on its own.
+  - action: button.press
+    target:
+      entity_id: "{{ start_button }}"
+
+  # Reset the bucket now rather than after the run. The water is committed at
+  # this point, and the whole point of device-side timing is that nothing after
+  # this line has to survive for the watering to finish correctly.
+  - action: smart_irrigation.reset_bucket
+    target:
+      entity_id: !input irrigation_zone
+
+  - alias: Failsafe - close the valve if its program did not
+    if:
+      - condition: template
+        value_template: "{{ use_failsafe }}"
+    then:
+      # A wait_template, not a state trigger: triggers do not template their
+      # entity_id, and the valve entity is derived rather than typed in.
+      - wait_template: "{{ is_state(valve_entity, 'off') }}"
+        timeout: "{{ water_seconds + (margin_seconds | int) }}"
+        continue_on_timeout: true
+
+      - if:
+          - condition: template
+            value_template: "{{ not wait.completed }}"
+        then:
+          - action: switch.turn_off
+            target:
+              entity_id: "{{ valve_entity }}"
+
+          - action: persistent_notification.create
+            data:
+              title: Irrigation failsafe fired
+              message: >-
+                {{ state_attr(valve_entity, 'friendly_name') or valve_entity }}
+                did not close itself {{ margin_seconds }}s after its
+                {{ water_seconds }}s program should have finished, so Home
+                Assistant closed it. The valve's timed irrigation program is
+                not working - do not rely on device-side timing until this is
+                resolved.
+              notification_id: swv_irrigation_failsafe
+
+mode: single
+max_exceeded: silent
