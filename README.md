@@ -81,9 +81,11 @@ You pick the **valve device** and the **zone sensor**; the switch, the three num
 the start button are found from the device. If they cannot be found the automation stops
 with a notification rather than watering blindly.
 
-Options: a pause switch, a maximum watering time, and a failsafe that waits for the
-valve to close and forces it shut if it has not — inert unless the device-side program
-fails.
+Options: a pause switch, a maximum watering time, a failsafe that waits for the valve
+to close and forces it shut if it has not (inert unless the device-side program fails),
+and an optional notification — pick one or more notify targets (a phone's mobile app,
+say) and you get a message when a watering starts, naming the valve and the duration
+("Rear Garden Valve is watering for 5 min 12 s").
 
 ## Verified
 

@@ -24,7 +24,7 @@ blueprint:
     the stock ZHA quirk creates none of them. If they cannot be found the
     automation stops with a notification rather than watering blindly.
   domain: automation
-  source_url: https://github.com/dgaust/smarterzones/blob/main/blueprints/smart_irrigation_swv.yaml
+  source_url: https://github.com/dgaust/sonoff-swv-quirk/blob/main/blueprints/automation/smart_irrigation_swv.yaml
 
   input:
     swv_device:
@@ -97,6 +97,18 @@ blueprint:
           unit_of_measurement: seconds
           mode: box
 
+    notify_targets:
+      name: Notify when watering starts
+      description: >-
+        Optional. Notification targets (mobile app, etc.) to tell when a watering
+        starts, with the valve and the duration. Leave empty for no notification.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: notify
+
 variables:
   swv_device: !input swv_device
   zone_entity: !input irrigation_zone
@@ -104,6 +116,7 @@ variables:
   max_seconds: !input max_duration
   use_failsafe: !input failsafe
   margin_seconds: !input failsafe_margin
+  notify_entities: !input notify_targets
 
   # The quirk names these entities, so their ids carry the field they drive.
   # Appending '' before `first` keeps a failed match as an empty string rather
@@ -130,6 +143,17 @@ variables:
   # is a whole-second integer, so round before clamping to the cap.
   water_seconds: >-
     {{ [ states(zone_entity) | float(0) | round(0) | int, max_seconds | int ] | min }}
+
+  # For the notification: the valve's friendly name and a human-readable duration.
+  valve_name: >-
+    {{ state_attr(valve_entity, 'friendly_name') or valve_entity }}
+  duration_text: >-
+    {% set s = water_seconds %}
+    {%- if s >= 60 -%}
+      {{ s // 60 }} min{{ ' %d s' | format(s % 60) if s % 60 else '' }}
+    {%- else -%}
+      {{ s }} s
+    {%- endif -%}
 
 alias: Smart Irrigation - SONOFF SWV (device-timed)
 description: ""
@@ -200,6 +224,19 @@ actions:
   - action: smart_irrigation.reset_bucket
     target:
       entity_id: !input irrigation_zone
+
+  - alias: Notify that watering has started
+    if:
+      - condition: template
+        value_template: "{{ notify_entities | count > 0 }}"
+    then:
+      - action: notify.send_message
+        target:
+          entity_id: "{{ notify_entities }}"
+        data:
+          title: Irrigation started
+          message: >-
+            {{ valve_name }} is watering for {{ duration_text }}.
 
   - alias: Failsafe - close the valve if its program did not
     if:
