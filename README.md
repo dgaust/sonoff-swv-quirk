@@ -109,6 +109,13 @@ The one thing not fully tested is the *volume* program stopping exactly at its t
 (the test was stopped by hand before it got there). The blueprint uses the *time*
 program, which is fully proven.
 
+## For developers
+
+If you want to hack on the quirk, port it, or drive the valve by hand, see
+[docs/PROTOCOL.md](docs/PROTOCOL.md) — the endpoint and clusters, every
+manufacturer-specific attribute, how the irrigation programs are encoded, and worked
+read/write examples.
+
 ## Thanks
 
 The valve's hidden features were mapped out by the
