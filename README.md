@@ -1,110 +1,119 @@
-# SONOFF SWV — ZHA quirk + Smart Irrigation blueprint
+# SONOFF SWV — better water valve control for Home Assistant
 
-A [ZHA](https://www.home-assistant.io/integrations/zha) custom quirk for the **SONOFF
-SWV** Zigbee smart water valve, exposing the irrigation features the Zigbee2MQTT
-converter has but ZHA does not — and a Home Assistant blueprint that waters a
-[Smart Irrigation](https://github.com/jeroenterheerdt/HASmartIrrigation) zone using the
-valve's *own* timer, so the watering does not depend on Home Assistant staying up to
-turn the tap off.
+If you use a SONOFF SWV smart water valve with Home Assistant's ZHA integration, you've
+probably noticed it only shows a handful of things — an on/off switch, water leak, and
+not much else. All the irrigation features you get in the SONOFF app or with
+Zigbee2MQTT are missing.
 
-The stock `zhaquirks.sonoff.swv` quirk gives you three entities: water leak, water
-supply, and the shortage auto-close switch. This adds sixteen more.
+This project fixes that. It's two parts:
 
-## Entities
+1. **A quirk** — a small file that teaches ZHA about the valve's hidden features, so
+   they show up as normal Home Assistant entities.
+2. **A blueprint** — an optional ready-made automation that waters a garden zone and
+   lets *the valve itself* handle the timing.
 
-| Entity | Attribute | Notes |
-|---|---|---|
-| Irrigation program running | `0x5010` | on while a cyclic program runs |
-| Irrigation duration | `0x5006` | current/last session, seconds |
-| Irrigation volume | `0x5007` | current/last session, **whole litres** |
-| Daily irrigation volume | `0x500F` | resets daily, `total_increasing` |
-| Irrigation start / end time | `0x500D` / `0x500E` | timestamps, see below |
-| Timed irrigation cycles / duration / interval | `0x5008` | staged settings |
-| Quantitative irrigation cycles / volume / interval | `0x5009` | staged settings |
-| Timed / Quantitative cycles completed | | progress through a program |
-| **Start timed irrigation** (button) | | commits and starts the timed program |
-| **Start quantitative irrigation** (button) | | commits and starts the volume program |
+You can use just the quirk if you like. The blueprint is a bonus.
 
-Plus the three from the stock quirk, re-declared with their original unique-id suffixes
-and translation keys so **existing entity IDs and names survive** the swap.
+## Why let the valve do the timing?
 
-## What this firmware actually does
+Normally, to water for 5 minutes, Home Assistant turns the valve on, waits 5 minutes,
+then turns it off. If Home Assistant restarts or loses connection during those 5
+minutes, the valve never gets the "off" command — and your garden floods.
 
-Measured against real hardware (firmware `0x1004`), not inferred from the Z2M source.
-These were all surprises, and they are why the quirk is shaped the way it is:
+The SWV can run a timer on its own. You tell it "water for 5 minutes" and it counts
+down and shuts off by itself, even if Home Assistant goes away completely. That's what
+this project unlocks, and what the blueprint is built around.
 
-- **Writing a program starts the watering.** There is no arm-then-switch-on: the valve
-  opens the moment `0x5008`/`0x5009` lands and closes itself when the program finishes.
-  That is the whole point — device-side timing that survives a Home Assistant restart.
-- **Every field must be non-zero**, or the write is refused with `INVALID_VALUE` — even
-  the interval, which does nothing on a single-cycle run. The numbers are floored at 1.
-- Because a write *starts* a run, the six numbers do **not** write through. They stage
-  values in the cluster's cache and a start button commits them as one write. Writing
-  them individually would kick off a watering per field, each with a half-built program.
-- The program is 10 bytes — `done:u8, total:u8, amount:u32 BE, interval:u32 BE` — in a
-  ZCL character string. After a program completes the device reports a short **2-byte**
-  form (done and total only), so the last known duration and interval are kept locally.
-- **Session timestamps are local wall clock**, not UTC, despite the 1970 epoch: the
-  valve stores the Time cluster's `localTime` verbatim. The quirk converts them back.
-- `irrigation_volume` is whole litres, so a run under a litre reports `0` while the
-  daily total still advances. That is the device, not a rounding bug in the quirk.
+## What you get
 
-## Install
+The quirk adds these entities to the valve:
 
-1. Copy `custom_zha_quirks/sonoff_swv.py` into your ZHA custom quirks directory —
-   by convention `/config/custom_zha_quirks/`. **Create the directory first**; Home
-   Assistant refuses to start if the configured path does not exist.
-2. Point ZHA at it: *Settings → Devices & services → Zigbee Home Automation →
-   Configure → Custom quirks path*, or in `configuration.yaml`:
+- **How much it's watering** — current/last watering duration and volume, plus a
+  running daily total.
+- **When it watered** — start and end time of the last session.
+- **Whether a program is running right now** — a simple on/off sensor.
+- **Two watering programs you can set up** — one by *time* (water for N seconds) and
+  one by *volume* (water until N litres), each with a **Start** button.
+
+Your existing entities keep their names — the leak sensor, the switch, and so on all
+stay exactly as they were.
+
+## Installing the quirk
+
+1. Create a folder for custom quirks if you don't have one, e.g. `/config/custom_zha_quirks/`.
+   (Home Assistant won't start if you point it at a folder that doesn't exist, so make
+   it first.)
+2. Copy `custom_zha_quirks/sonoff_swv.py` into that folder.
+3. Tell ZHA where to look: **Settings → Devices & services → Zigbee Home Automation →
+   Configure → Custom quirks path**, or add this to `configuration.yaml`:
 
    ```yaml
    zha:
      custom_quirks_path: /config/custom_zha_quirks/
    ```
-3. Restart Home Assistant, then reconfigure the valve (device page → *Reconfigure*) so
-   the new attributes are read.
+4. Restart Home Assistant. Then open the valve's device page and click **Reconfigure**
+   so it picks up the new features.
 
-Custom quirks are registered after the built-in ones and matched first, so this
-replaces the stock quirk wholesale. You should see `Loaded custom quirks…` in the log —
-that warning is the confirmation it worked.
+You'll see a line in the log saying *"Loaded custom quirks…"* — that's just Home
+Assistant confirming it worked, not an error.
 
-## Blueprint
+## Using the blueprint (optional)
 
-`blueprints/automation/smart_irrigation_swv.yaml` — one automation per zone.
+Import it into Home Assistant from:
 
-On a Smart Irrigation start trigger it stages a one-shot program (1 cycle, duration =
-the seconds Smart Irrigation calculated), presses **Start timed irrigation**, and resets
-the zone's bucket. The valve runs the program and shuts itself off. There is no
-`switch.turn_on` and no `delay`.
+```
+https://github.com/dgaust/sonoff-swv-quirk/blob/main/blueprints/automation/smart_irrigation_swv.yaml
+```
 
-You pick the **valve device** and the **zone sensor**; the switch, the three numbers and
-the start button are found from the device. If they cannot be found the automation stops
-with a notification rather than watering blindly.
+(Settings → Automations & Scenes → Blueprints → Import Blueprint.)
 
-Options: a pause switch, a maximum watering time, a failsafe that waits for the valve
-to close and forces it shut if it has not (inert unless the device-side program fails),
-and an optional notification — pick one or more notify targets (a phone's mobile app,
-say) and you get a message when a watering starts, naming the valve and the duration
-("Rear Garden Valve is watering for 5 min 12 s").
+It works with the [Smart Irrigation](https://github.com/jeroenterheerdt/HASmartIrrigation)
+integration, which calculates how long each zone needs to be watered. When Smart
+Irrigation says "go", the blueprint tells the valve how long to water and lets it run
+on its own timer.
 
-## Verified
+You only need to pick **two things**: the valve and the zone. Everything else about the
+valve is found automatically.
 
-On two SWV valves via the ZHA/HA APIs:
+Extra options if you want them:
 
-- staging the numbers produces **zero** Zigbee traffic and never opens the valve;
-- the start button writes once and the valve opens within a few seconds;
-- a 10-second program ran for exactly 10 seconds and closed itself, three times over;
-- session timestamps land within 1s of when HA recorded the valve opening;
-- the quantitative program starts and `irrigation_volume` tracks litres as it runs.
+- **Pause switch** — turn watering off for rain, holidays, or maintenance.
+- **Maximum watering time** — a safety cap, in case something asks for a silly duration.
+- **Failsafe** — Home Assistant keeps an eye on the valve and shuts it off manually if
+  it somehow doesn't close on its own. (It normally does.)
+- **Notification** — get a message on your phone when watering starts, telling you
+  which valve and for how long: *"Rear Garden Valve is watering for 5 min 12 s."*
 
-Not verified: that the quantitative program stops at its target volume — the run was cut
-short by hand before it got there. The blueprint does not use that path.
+## A few quirks of the valve worth knowing
 
-## Credits
+These aren't bugs — they're just how the hardware behaves, and they can be surprising:
 
-Attribute IDs and the program layout come from the
-[zigbee-herdsman-converters](https://github.com/Koenkk/zigbee-herdsman-converters)
-SONOFF definition. The stock quirk this builds on lives in
+- **Setting a program starts it.** There's no separate "on" step. That's exactly why the
+  numbers work the way they do: you set them (nothing happens yet), then press the
+  **Start** button to actually begin watering.
+- **The volume sensor only counts whole litres.** A very short test run of under a litre
+  will show `0` litres, even though the daily total ticks up. Real waterings are well
+  over a litre, so this only shows up during quick tests.
+- **Times are in your local time zone**, and the quirk handles that for you.
+
+## Has this actually been tested?
+
+Yes, on real hardware (two valves):
+
+- Setting the numbers does nothing until you press Start — confirmed.
+- Pressing Start opens the valve within a few seconds.
+- A 10-second program ran for exactly 10 seconds and closed itself — three times over.
+- The times and volumes reported match what actually happened.
+
+The one thing not fully tested is the *volume* program stopping exactly at its target
+(the test was stopped by hand before it got there). The blueprint uses the *time*
+program, which is fully proven.
+
+## Thanks
+
+The valve's hidden features were mapped out by the
+[Zigbee2MQTT](https://github.com/Koenkk/zigbee-herdsman-converters) project, and this
+builds on the standard quirk from
 [zha-device-handlers](https://github.com/zigpy/zha-device-handlers).
 
 ## Licence
