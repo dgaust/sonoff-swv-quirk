@@ -102,12 +102,12 @@ Yes, on real hardware (two valves):
 
 - Setting the numbers does nothing until you press Start — confirmed.
 - Pressing Start opens the valve within a few seconds.
-- A 10-second program ran for exactly 10 seconds and closed itself — three times over.
+- A 10-second *time* program ran for exactly 10 seconds and closed itself — three times over.
+- A 3-litre *volume* program delivered exactly 3 litres and closed itself.
 - The times and volumes reported match what actually happened.
 
-The one thing not fully tested is the *volume* program stopping exactly at its target
-(the test was stopped by hand before it got there). The blueprint uses the *time*
-program, which is fully proven.
+Both program types run to their target and shut off on their own. The blueprint uses the
+*time* program.
 
 ## For developers
 
