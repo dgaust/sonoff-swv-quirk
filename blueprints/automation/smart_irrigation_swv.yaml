@@ -109,6 +109,20 @@ blueprint:
           filter:
             - domain: notify
 
+    notify_complete_targets:
+      name: Notify when watering completes
+      description: >-
+        Optional. Notification targets to tell when a watering finishes, with the
+        valve, the duration and the litres delivered (read from the valve's own
+        per-session irrigation volume sensor). Leave empty for no completion
+        notification. Independent of the "watering starts" targets above.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: notify
+
 variables:
   swv_device: !input swv_device
   zone_entity: !input irrigation_zone
@@ -117,6 +131,7 @@ variables:
   use_failsafe: !input failsafe
   margin_seconds: !input failsafe_margin
   notify_entities: !input notify_targets
+  notify_complete_entities: !input notify_complete_targets
 
   # The quirk names these entities, so their ids carry the field they drive.
   # Appending '' before `first` keeps a failed match as an empty string rather
@@ -137,6 +152,13 @@ variables:
   valve_entity: >-
     {{ (device_entities(swv_device) | select('match', 'switch')
         | reject('search', 'shortage') | reject('search', 'auto_close')
+        | list + ['']) | first }}
+
+  # The valve's own per-session volume sensor resets to 0 at the start of a run
+  # and accumulates that session's litres; reject the 'daily' running total.
+  volume_sensor: >-
+    {{ (device_entities(swv_device) | select('match', 'sensor')
+        | select('search', 'irrigation_volume') | reject('search', 'daily')
         | list + ['']) | first }}
 
   # Smart Irrigation reports seconds, sometimes fractional; the valve's number
@@ -268,6 +290,30 @@ actions:
                 not working - do not rely on device-side timing until this is
                 resolved.
               notification_id: swv_irrigation_failsafe
+
+  - alias: Notify that watering has completed
+    if:
+      - condition: template
+        value_template: "{{ notify_complete_entities | count > 0 }}"
+    then:
+      # If the failsafe ran it already waited, so the valve is off and this
+      # returns at once. With the failsafe off, this is the wait for the run.
+      - wait_template: "{{ is_state(valve_entity, 'off') }}"
+        timeout: "{{ water_seconds + (margin_seconds | int) }}"
+        continue_on_timeout: true
+
+      # Let the valve's final volume report land over Zigbee before reading it.
+      - delay: 10
+
+      - action: notify.send_message
+        target:
+          entity_id: "{{ notify_complete_entities }}"
+        data:
+          title: Irrigation finished
+          message: >-
+            {{ valve_name }} watered for {{ duration_text }}{% if volume_sensor
+            and states(volume_sensor) not in ['unknown', 'unavailable'] %}, using
+            {{ states(volume_sensor) }} L{% endif %}.
 
 mode: single
 max_exceeded: silent
