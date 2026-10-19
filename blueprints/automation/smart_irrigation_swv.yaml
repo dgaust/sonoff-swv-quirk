@@ -240,10 +240,15 @@ actions:
     target:
       entity_id: "{{ start_button }}"
 
-  # Reset the bucket now rather than after the run. The water is committed at
-  # this point, and the whole point of device-side timing is that nothing after
-  # this line has to survive for the watering to finish correctly.
-  - action: smart_irrigation.reset_bucket
+  # Credit the committed water now rather than after the run - device-side
+  # timing means nothing after this line has to survive for the watering to
+  # finish. credit_watering (not reset_bucket) credits exactly the seconds we
+  # wrote to the valve, so a deficit capped at max_duration keeps the water it
+  # did not deliver instead of being zeroed. water_seconds is already the capped
+  # value written to the valve.
+  - action: smart_irrigation.credit_watering
+    data:
+      seconds: "{{ water_seconds }}"
     target:
       entity_id: !input irrigation_zone
 
