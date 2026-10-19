@@ -30,6 +30,8 @@ The quirk adds these entities to the valve:
 
 - **How much it's watering** — current/last watering duration and volume, plus a
   running daily total.
+- **How fast it's flowing** — a session flow rate (L/min) worked out from the
+  session's volume and runtime, since the device's own flow reading sits at zero.
 - **When it watered** — start and end time of the last session.
 - **Whether a program is running right now** — a simple on/off sensor.
 - **Two watering programs you can set up** — one by *time* (water for N seconds) and

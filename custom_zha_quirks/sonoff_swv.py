@@ -49,7 +49,23 @@ from zhaquirks.builder import (
 )
 from zhaquirks.clusters import CustomCluster
 
+# UnitOfVolumeFlowRate is not re-exported by zhaquirks.builder, so take it from
+# Home Assistant directly - the quirk only ever loads inside HA's ZHA.
+from homeassistant.const import UnitOfVolumeFlowRate
+
 EWELINK_CLUSTER_ID = 0xFC11
+
+
+def as_litres_per_minute(value: int | None) -> float | None:
+    """Scale the stored centilitres-per-minute back to litres per minute.
+
+    The flow rate is derived locally and kept in an integer attribute as
+    centilitres per minute, so two decimals survive; here it is turned back
+    into the litres-per-minute the sensor reports.
+    """
+    if value is None:
+        return None
+    return round(value / 100, 2)
 
 
 def as_timestamp(value: int) -> datetime | None:
@@ -232,6 +248,14 @@ class SonoffWaterValveCluster(CustomCluster):
             id=0xFF09, type=t.uint8_t, manufacturer_code=None
         )
 
+        # Derived locally from the session volume and duration: the device's own
+        # flow attribute reads zero, so average flow is volume / runtime. Stored
+        # as centilitres per minute so the integer attribute keeps two decimals;
+        # it never travels over the air.
+        session_flow_rate = ZCLAttributeDef(
+            id=0xFF0A, type=t.uint32_t, manufacturer_code=None
+        )
+
     # virtual attribute id -> (packed attribute id, field index)
     VIRTUAL_ATTRIBUTES: dict[int, tuple[int, int]] = {
         0xFF00: (0x5008, 0),
@@ -250,6 +274,10 @@ class SonoffWaterValveCluster(CustomCluster):
         0xFF09: 0x5009,
     }
 
+    # Attributes this quirk computes itself and only ever serves from its cache -
+    # the device has no such attribute, so they must never reach it.
+    COMPUTED_ATTRIBUTES: frozenset[int] = frozenset({0xFF0A})
+
     def _local_id(self, attribute: Any, manufacturer: Any = UNDEFINED) -> int | None:
         """Return the id of `attribute` if this quirk handles it locally."""
         try:
@@ -257,7 +285,11 @@ class SonoffWaterValveCluster(CustomCluster):
         except KeyError:
             return None
 
-        if attr_def.id in self.VIRTUAL_ATTRIBUTES or attr_def.id in self.START_ATTRIBUTES:
+        if (
+            attr_def.id in self.VIRTUAL_ATTRIBUTES
+            or attr_def.id in self.START_ATTRIBUTES
+            or attr_def.id in self.COMPUTED_ATTRIBUTES
+        ):
             return attr_def.id
 
         return None
@@ -284,8 +316,17 @@ class SonoffWaterValveCluster(CustomCluster):
         return fields
 
     def _update_attribute(self, attrid: int, value: Any) -> None:
-        """Fan a packed program out over its virtual attributes."""
+        """Fan a packed program out over its virtual attributes, and keep the
+        derived session flow rate in step with the duration and volume."""
         super()._update_attribute(attrid, value)
+
+        # A new session duration or volume changes the average flow rate.
+        if attrid in (
+            self.AttributeDefs.real_time_irrigation_duration.id,
+            self.AttributeDefs.real_time_irrigation_volume.id,
+        ):
+            self._recompute_flow_rate()
+            return
 
         if attrid not in (0x5008, 0x5009):
             return
@@ -299,6 +340,27 @@ class SonoffWaterValveCluster(CustomCluster):
             # cached value alone beats blanking a program we still know.
             if packed_id == attrid and fields[index] is not None:
                 super()._update_attribute(virtual_id, fields[index])
+
+    def _recompute_flow_rate(self) -> None:
+        """Derive the session flow rate from its volume and duration.
+
+        The device's own flow attribute reads zero, but it reports the running
+        session's litres and seconds, so average flow is volume / runtime.
+        Recomputed on every duration or volume report: during a run it converges
+        on the real rate, and afterwards it holds the finished run's average
+        until the next session resets both to zero. The first few seconds are
+        skipped so a one-litre, one-second early report cannot spike it. Stored
+        as centilitres per minute to keep two decimals in an integer attribute.
+        """
+        duration = super().get(self.AttributeDefs.real_time_irrigation_duration.id)
+        volume = super().get(self.AttributeDefs.real_time_irrigation_volume.id)
+        if volume is None or not duration or int(duration) < 5:
+            return
+
+        flow_cl_per_min = round(int(volume) * 6000 / int(duration))
+        super()._update_attribute(
+            self.AttributeDefs.session_flow_rate.id, flow_cl_per_min
+        )
 
     def get(self, key: int | str, default: Any | None = None) -> Any:
         """Get a cached attribute, deriving this quirk's own when they are missing.
@@ -319,6 +381,11 @@ class SonoffWaterValveCluster(CustomCluster):
 
         if local_id in self.START_ATTRIBUTES:
             return 0
+
+        # A computed attribute has no device fallback: it is unknown until the
+        # first duration/volume report lets _recompute_flow_rate fill it in.
+        if local_id in self.COMPUTED_ATTRIBUTES:
+            return None
 
         packed_id, index = self.VIRTUAL_ATTRIBUTES[local_id]
         return self._program_fields(packed_id)[index]
@@ -542,6 +609,19 @@ class SonoffWaterValveCluster(CustomCluster):
         unique_id_suffix="irrigation_volume",
         translation_key="swv_irrigation_volume",
         fallback_name="Irrigation volume",
+    )
+    .sensor(
+        SonoffWaterValveCluster.AttributeDefs.session_flow_rate.name,
+        SonoffWaterValveCluster.cluster_id,
+        device_class=SensorDeviceClass.VOLUME_FLOW_RATE,
+        state_class=SensorStateClass.MEASUREMENT,
+        unit=UnitOfVolumeFlowRate.LITERS_PER_MINUTE,
+        suggested_display_precision=2,
+        attribute_converter=as_litres_per_minute,
+        attribute_initialized_from_cache=False,
+        unique_id_suffix="session_flow_rate",
+        translation_key="swv_session_flow_rate",
+        fallback_name="Session flow rate",
     )
     .sensor(
         SonoffWaterValveCluster.AttributeDefs.daily_irrigation_volume.name,
