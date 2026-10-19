@@ -123,6 +123,19 @@ blueprint:
           filter:
             - domain: notify
 
+    credit_bucket:
+      name: Credit the bucket when the run starts
+      description: >-
+        Credit this zone's Smart Irrigation bucket with the water the run
+        delivers, the moment the valve is started (by the seconds written to
+        it). Leave ON for the normal setup. Turn it OFF only if you let Smart
+        Irrigation's own "observed watering" credit the bucket from a flow
+        meter instead - otherwise the same run is counted twice and the zone
+        slowly stops watering.
+      default: true
+      selector:
+        boolean:
+
 variables:
   swv_device: !input swv_device
   zone_entity: !input irrigation_zone
@@ -132,6 +145,7 @@ variables:
   margin_seconds: !input failsafe_margin
   notify_entities: !input notify_targets
   notify_complete_entities: !input notify_complete_targets
+  credit_bucket: !input credit_bucket
 
   # The quirk names these entities, so their ids carry the field they drive.
   # Appending '' before `first` keeps a failed match as an empty string rather
@@ -245,12 +259,18 @@ actions:
   # finish. credit_watering (not reset_bucket) credits exactly the seconds we
   # wrote to the valve, so a deficit capped at max_duration keeps the water it
   # did not deliver instead of being zeroed. water_seconds is already the capped
-  # value written to the valve.
-  - action: smart_irrigation.credit_watering
-    data:
-      seconds: "{{ water_seconds }}"
-    target:
-      entity_id: !input irrigation_zone
+  # value written to the valve. Skipped when observed watering is doing the
+  # crediting, so the run is not counted twice.
+  - alias: Credit the committed water, unless observed watering does it
+    if:
+      - condition: template
+        value_template: "{{ credit_bucket }}"
+    then:
+      - action: smart_irrigation.credit_watering
+        data:
+          seconds: "{{ water_seconds }}"
+        target:
+          entity_id: !input irrigation_zone
 
   - alias: Notify that watering has started
     if:
